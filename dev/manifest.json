@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "name": "Better Notes Editor Probe",
+  "version": "1.0.3",
+  "description": "探针插件：打印 Better Notes / Zotero 笔记编辑器（ProseMirror）的真实结构，用于定位 $f$ 数学公式不被解析的问题。",
+  "author": "wangce",
+  "applications": {
+    "zotero": {
+      "id": "better-notes-editor-probe@wangce.dev",
+      "update_url": "https://example.com/updates.json",
+      "strict_min_version": "6.999",
+      "strict_max_version": "10.0.*"
+    }
+  }
+}

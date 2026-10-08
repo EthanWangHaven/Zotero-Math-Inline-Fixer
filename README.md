@@ -135,8 +135,28 @@ Zotero-Math-Inline-Fixer/
 ├── mathfixer.js       # 全部逻辑：识别、ProseMirror 事务、触发管道
 ├── icons/             # 48px / 96px 图标
 ├── mathfixer.xpi      # 预编译安装包
+├── dev/               # 开发调试工具（Editor Probe，见下节）
+│   ├── manifest.json
+│   ├── bootstrap.js
+│   ├── probe.js
+│   └── editor-probe.xpi
 └── README.md
 ```
+
+---
+
+## 开发调试工具（`dev/`）
+
+`dev/` 目录里是 **Editor Probe** —— 一个独立的诊断插件（**普通用户无需安装**），开发本插件时用来探查 Zotero 笔记编辑器的内部结构：
+
+- 打印 `EditorInstance` / `_editorCore` / ProseMirror `EditorView` 的真实属性
+- 列出当前笔记编辑器的 schema 节点与 marks（含 `math_inline` / `math_display`）
+- 扫描文档中的 math 节点分布、含 `$` 的文本节点数
+- 用与 Math Fixer 相同的正则做匹配测试（只报告、不修改文档）
+
+**用法：** 安装 `dev/editor-probe.xpi` → 打开一个笔记 → 菜单 **工具 → Probe 编辑器结构**（或 `Ctrl+Shift+P`）→ 在 Zotero 调试输出 / 弹出窗口中查看报告。
+
+**适用人群：** 想开发类似插件、或排查公式渲染问题的开发者。日常使用 Math Fixer 不需要它。
 
 ---
 
