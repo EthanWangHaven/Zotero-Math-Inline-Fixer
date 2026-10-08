@@ -127,12 +127,14 @@ var MathFixer = {
   },
 
   addToWindow(win) {
-    if (!win || !win.document || this._windows.has(win)) {
+    if (!win || !win.document) {
       return;
     }
     let doc = win.document;
 
-    // 工具菜单入口
+    // Tools 菜单项：每次调用都确保存在（幂等）。
+    // 不能依赖 _windows 集合做短路——若窗口初始化早期 popup 尚未就绪，
+    // 一次性失败会让菜单项永远丢失，表现为「插件失联」。
     let toolsPopup =
       doc.getElementById("menu_ToolsPopup") || doc.getElementById("menu_toolsPopup");
     if (toolsPopup && !toolsPopup.querySelector("#mathfixer-tools-menuitem")) {
@@ -144,38 +146,39 @@ var MathFixer = {
         mi.setAttribute("label", "Math Fixer");
         mi.addEventListener("command", () => this.fixActiveEditor(win, true));
         toolsPopup.appendChild(mi);
+        Zotero.debug("[MathFixer] 已（重新）挂上 Tools 菜单项");
       } catch (e) {
         /* ignore */
       }
     }
 
-    // 快捷键 Ctrl+Shift+M
-    // event.repeat 过滤系统按键自动重复；800ms 防抖兜底，
-    // 避免按住按键或多次触发时连环弹窗。
-    let onKeyDown = (event) => {
-      if (
-        event.ctrlKey &&
-        event.shiftKey &&
-        !event.altKey &&
-        (event.key === "M" || event.key === "m")
-      ) {
-        event.preventDefault();
-        event.stopPropagation();
-        if (event.repeat) {
-          return;
+    // 快捷键 Ctrl+Shift+M：以 win.__mathFixerKeyDown 为幂等标志（防重复注册）
+    if (!win.__mathFixerKeyDown) {
+      let onKeyDown = (event) => {
+        if (
+          event.ctrlKey &&
+          event.shiftKey &&
+          !event.altKey &&
+          (event.key === "M" || event.key === "m")
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.repeat) {
+            return;
+          }
+          let now = Date.now();
+          if (now - (win.__mathFixerLastManualFix || 0) < 800) {
+            return;
+          }
+          win.__mathFixerLastManualFix = now;
+          this.fixActiveEditor(win, true);
         }
-        let now = Date.now();
-        if (now - (win.__mathFixerLastManualFix || 0) < 800) {
-          return;
-        }
-        win.__mathFixerLastManualFix = now;
-        this.fixActiveEditor(win, true);
-      }
-    };
-    win.addEventListener("keydown", onKeyDown, true);
+      };
+      win.addEventListener("keydown", onKeyDown, true);
+      win.__mathFixerKeyDown = onKeyDown;
+    }
 
     this._windows.add(win);
-    win.__mathFixerKeyDown = onKeyDown;
   },
 
   removeFromWindow(win) {
@@ -716,7 +719,7 @@ var MathFixer = {
 
   /* ======================= 定期扫描新编辑器 ======================= */
 
-  /** 周期性地为所有活动编辑器挂上 paste 监听（处理新打开的笔记） */
+  /** 周期性地为所有活动编辑器挂上 paste 监听，并自愈检查 UI（处理新打开的笔记） */
   startAutoAttach() {
     if (this._timer) {
       return;
@@ -724,18 +727,17 @@ var MathFixer = {
     let loggedOnce = false;
     this._timer = setInterval(() => {
       try {
+        // 自愈：确保每个主窗口的菜单项与快捷键仍在（菜单被重建等场景可自动恢复）
+        this.addToAllWindows();
         let instances = (Zotero.Notes && Zotero.Notes._editorInstances) || [];
         if (!loggedOnce) {
+          loggedOnce = true;
           Zotero.debug("[MathFixer] 轮询中，当前编辑器实例数=" + instances.length);
         }
         for (let e of instances) {
           try {
             if (e && e._iframeWindow && !Components.utils.isDeadWrapper(e._iframeWindow)) {
-              let ok = this.attachPasteListener(e);
-              if (ok && !loggedOnce) {
-                loggedOnce = true;
-                Zotero.debug("[MathFixer] 已完成首次 paste 监听挂载");
-              }
+              this.attachPasteListener(e);
             }
           } catch (err) {
             Zotero.debug(
