@@ -360,10 +360,10 @@ var MathFixer = {
     if (notify) {
       let lines = ["共修复 " + targets.length + " 处公式："];
       if (nSingle > 0) {
-        lines.push("  · 单字符行内公式：" + nSingle + " 处");
+        lines.push("  单字符行内公式：" + nSingle + " 处");
       }
       if (nCoord > 0) {
-        lines.push("  · 坐标/多字符公式：" + nCoord + " 处");
+        lines.push("  坐标/多字符公式：" + nCoord + " 处");
       }
       Zotero.alert(null, "Math Fixer", lines.join("\n"));
     }
