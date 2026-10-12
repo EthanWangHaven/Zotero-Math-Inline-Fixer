@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Zotero Math Inline Fixer",
-  "version": "1.1.2",
-  "description": "Fix math formulas pasted into Zotero/Better Notes notes that fail to render: converts single-char $f$, inline $(11,20)$, and standalone $$...$$ blocks into proper math_inline nodes.",
+  "version": "1.4.1",
+  "description": "Fix math formulas pasted into Zotero/Better Notes notes that fail to render: converts single-char $f$, inline $(11,20)$, and standalone $$...$$ blocks into proper math_inline nodes. Includes a clipboard-converter window (toolbar icon / Ctrl+Alt+A): paste raw AI Markdown/LaTeX, preview the Better Notes-compatible conversion, copy, then paste into your note.",
   "author": "wangce",
   "icons": {
     "48": "icons/icon-48.png",

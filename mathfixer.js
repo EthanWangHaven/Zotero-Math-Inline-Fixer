@@ -88,6 +88,13 @@ var MathFixer = {
         doc.removeEventListener("keyup", wj.__mathFixerOnInput, true);
         doc.removeEventListener("input", wj.__mathFixerOnInput, true);
       }
+      if (wj.__mathFixerOnKeys) {
+        try {
+          doc.removeEventListener("keydown", wj.__mathFixerOnKeys, true);
+        } catch (eKeys) {
+          /* ignore */
+        }
+      }
     } catch (e) {
       /* ignore */
     }
@@ -143,12 +150,42 @@ var MathFixer = {
           ? doc.createXULElement("menuitem")
           : doc.createElement("menuitem");
         mi.id = "mathfixer-tools-menuitem";
-        mi.setAttribute("label", "Math Fixer");
+        mi.setAttribute("label", "笔记格式修复 (Ctrl+Shift+M)");
         mi.addEventListener("command", () => this.fixActiveEditor(win, true));
         toolsPopup.appendChild(mi);
         Zotero.debug("[MathFixer] 已（重新）挂上 Tools 菜单项");
       } catch (e) {
         /* ignore */
+      }
+    }
+
+    // 裸字母转公式：选区 / 全文（幂等）
+    if (toolsPopup && !toolsPopup.querySelector("#mathfixer-tools-bare-sel")) {
+      try {
+        let miB1 = doc.createXULElement
+          ? doc.createXULElement("menuitem")
+          : doc.createElement("menuitem");
+        miB1.id = "mathfixer-tools-bare-sel";
+        miB1.setAttribute("label", "裸字母转公式（选区）(Ctrl+Alt+S)");
+        miB1.addEventListener("command", () => this.wrapBareLettersActive(win, true, false));
+        toolsPopup.appendChild(miB1);
+        Zotero.debug("[MathFixer] 已挂上裸字母转公式菜单（选区）");
+      } catch (e) {
+        Zotero.debug("[MathFixer] 挂裸字母菜单（选区）失败: " + (e && e.message ? e.message : e));
+      }
+    }
+    if (toolsPopup && !toolsPopup.querySelector("#mathfixer-tools-bare-all")) {
+      try {
+        let miB2 = doc.createXULElement
+          ? doc.createXULElement("menuitem")
+          : doc.createElement("menuitem");
+        miB2.id = "mathfixer-tools-bare-all";
+        miB2.setAttribute("label", "裸字母转公式（全文）");
+        miB2.addEventListener("command", () => this.wrapBareLettersActive(win, true, true));
+        toolsPopup.appendChild(miB2);
+        Zotero.debug("[MathFixer] 已挂上裸字母转公式菜单（全文）");
+      } catch (e) {
+        Zotero.debug("[MathFixer] 挂裸字母菜单（全文）失败: " + (e && e.message ? e.message : e));
       }
     }
 
@@ -178,6 +215,30 @@ var MathFixer = {
       win.__mathFixerKeyDown = onKeyDown;
     }
 
+    // 快捷键 Ctrl+Alt+S：裸字母转公式（选区模式，幂等）
+    if (!win.__mathFixerKeyBare) {
+      let onBare = (event) => {
+        if (
+          event.ctrlKey &&
+          event.altKey &&
+          !event.shiftKey &&
+          !event.repeat &&
+          (event.key === "S" || event.key === "s")
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          let nowB = Date.now();
+          if (nowB - (win.__mathFixerLastBare || 0) < 800) {
+            return;
+          }
+          win.__mathFixerLastBare = nowB;
+          this.wrapBareLettersActive(win, true, false);
+        }
+      };
+      win.addEventListener("keydown", onBare, true);
+      win.__mathFixerKeyBare = onBare;
+    }
+
     this._windows.add(win);
   },
 
@@ -188,7 +249,9 @@ var MathFixer = {
     try {
       let doc = win.document;
       doc
-        .querySelectorAll("#mathfixer-tools-menuitem")
+        .querySelectorAll(
+          "#mathfixer-tools-menuitem, #mathfixer-tools-bare-sel, #mathfixer-tools-bare-all",
+        )
         .forEach((el) => el.remove());
     } catch (e) {
       /* ignore */
@@ -196,6 +259,10 @@ var MathFixer = {
     if (win.__mathFixerKeyDown) {
       win.removeEventListener("keydown", win.__mathFixerKeyDown, true);
       delete win.__mathFixerKeyDown;
+    }
+    if (win.__mathFixerKeyBare) {
+      win.removeEventListener("keydown", win.__mathFixerKeyBare, true);
+      delete win.__mathFixerKeyBare;
     }
     this._windows.delete(win);
   },
@@ -250,13 +317,13 @@ var MathFixer = {
   _notifyTransient(message) {
     try {
       let pw = new Zotero.ProgressWindow({ closeOnClick: true });
-      pw.changeHeadline("Math Fixer");
+      pw.changeHeadline("笔记格式修复");
       pw.addLines(message);
       pw.show();
       pw.startCloseTimer(2500);
     } catch (e) {
       try {
-        Zotero.alert(null, "Math Fixer", message);
+        Zotero.alert(null, "笔记格式修复", message);
       } catch (e2) {
         /* ignore */
       }
@@ -287,7 +354,7 @@ var MathFixer = {
     // 确认 schema 里有 math_inline
     if (!schema.nodes.math_inline) {
       if (notify) {
-        Zotero.alert(null, "Math Fixer", "当前编辑器 schema 中没有 math_inline 节点，无法修复。");
+        Zotero.alert(null, "笔记格式修复", "当前编辑器 schema 中没有 math_inline 节点，无法修复。");
       }
       return 0;
     }
@@ -368,7 +435,7 @@ var MathFixer = {
       if (nCoord > 0) {
         lines.push("  坐标/多字符公式：" + nCoord + " 处");
       }
-      Zotero.alert(null, "Math Fixer", lines.join("\n"));
+      Zotero.alert(null, "笔记格式修复", lines.join("\n"));
     }
     return targets.length;
   },
@@ -658,6 +725,61 @@ var MathFixer = {
     wj.__mathFixerOnPaste = exportedPaste;
     wj.__mathFixerOnInput = exportedInput;
 
+    // 快捷键：在编辑器 iframe 内监听 Ctrl+Shift+M / Ctrl+Alt+S。
+    // iframe 是独立文档，主窗口的 keydown 监听收不到编辑器内的按键，
+    // 必须在这里再挂一份
+    let exportedKeys = Components.utils.exportFunction(
+      function (event) {
+        try {
+          if (!event || !event.ctrlKey || event.repeat) {
+            return;
+          }
+          let nowK = Date.now();
+          if (event.shiftKey && !event.altKey && (event.key === "M" || event.key === "m")) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (nowK - (wj.__mathFixerLastKeyFix || 0) < 800) {
+              return;
+            }
+            wj.__mathFixerLastKeyFix = nowK;
+            outer.fixEditor(editor, true);
+          } else if (
+            !event.shiftKey &&
+            event.altKey &&
+            (event.key === "S" || event.key === "s")
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (nowK - (wj.__mathFixerLastKeyBare || 0) < 800) {
+              return;
+            }
+            wj.__mathFixerLastKeyBare = nowK;
+            // 选区模式：无选区则提示（与主窗口语义一致）
+            let sel = null;
+            try {
+              sel = core.view.state.selection;
+            } catch (eSel) {
+              sel = null;
+            }
+            if (!sel || sel.empty) {
+              outer._notifyTransient("请先在笔记中选中一段文字（或用 Tools 菜单的全文模式）");
+              return;
+            }
+            outer.wrapBareLetters(editor, sel.from, sel.to, true);
+          }
+        } catch (eKey) {
+          Zotero.debug(
+            "[MathFixer] 编辑器内快捷键处理出错: " +
+              (eKey && eKey.message ? eKey.message : eKey),
+          );
+        }
+      },
+      wj,
+      { defineAs: "__mathFixerKeyHandler" },
+    );
+    doc.addEventListener("keydown", exportedKeys, true);
+    wj.__mathFixerOnKeys = exportedKeys;
+
     // 触发 2：MutationObserver —— 兜底。即使上面事件都没捕获，
     // 只要 ProseMirror 把内容插入 DOM，就会触发这里。
     // 优先观察 ProseMirror 节点本身（变动就发生在它内部）。
@@ -692,11 +814,24 @@ var MathFixer = {
       defineAs: "__mathFixerMutateHandler",
     });
     let observer = new wj.MutationObserver(exportedMutate);
-    observer.observe(pmDom || doc.body || doc.documentElement, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-    });
+    try {
+      // 跨 realm：选项对象直接传入会被 Xray 剥离布尔值（报
+      // "must not be false"），需 waiveXrays；且 observe 失败不得中断
+      // 挂载流程，否则 __mathFixerAttached 永不置位导致监听反复重挂
+      observer.observe(
+        pmDom || doc.body || doc.documentElement,
+        Components.utils.waiveXrays({
+          childList: true,
+          subtree: true,
+          characterData: true,
+        }),
+      );
+    } catch (eObs) {
+      Zotero.debug(
+        "[MathFixer] MutationObserver 挂载失败（不影响 paste/keyboard 修复）: " +
+          (eObs && eObs.message ? eObs.message : eObs),
+      );
+    }
     wj.__mathFixerObserver = observer;
 
     wj.__mathFixerAttached = true;
@@ -715,6 +850,179 @@ var MathFixer = {
       return;
     }
     this.fixEditor(editor, notify);
+  },
+
+  /* ======================= 裸单字母转公式（手动） ======================= */
+
+  /**
+   * 裸字母转公式入口。wholeDoc=false 时仅处理当前选区；
+   * 选区为空则提示。仅手动触发，不进入粘贴后的自动扫描路径。
+   */
+  wrapBareLettersActive(win, notify, wholeDoc) {
+    let editor = this.findActiveEditor();
+    if (!editor) {
+      if (notify) {
+        this._notifyTransient("未找到打开的笔记编辑器，请先打开一个笔记");
+      }
+      return;
+    }
+    let core = this.getEditorCore(editor);
+    if (!core) {
+      if (notify) {
+        this._notifyTransient("未找到可用的笔记编辑器，请先打开一个笔记");
+      }
+      return;
+    }
+    let state = core.view.state;
+    let from = 0;
+    let to = state.doc.content.size;
+    if (!wholeDoc) {
+      let sel = state.selection;
+      if (!sel || sel.empty) {
+        if (notify) {
+          this._notifyTransient("请先在笔记中选中一段文字（或改用「全文」菜单）");
+        }
+        return;
+      }
+      from = sel.from;
+      to = sel.to;
+    }
+    this.wrapBareLetters(editor, from, to, notify);
+  },
+
+  /**
+   * 把 [from, to] 范围内的「裸单英文字母」包上 $...$，使其渲染为数学
+   * 斜体（大小写均可）。单个可撤销事务提交。
+   *
+   * 防误伤规则（必须全部满足才命中）：
+   *   - 前后都不是英文字母/数字（ax、x2、4x 不算）
+   *   - 前后都没有 $ 或 \（已在公式定界符边缘的不碰）
+   *   - 前面不是撇号（it's 的 s 不算）
+   *   - 后面不是 ". "（列表编号 a. / 句尾 p. 不算，宁可漏）
+   *   - 后面不是 ")" 或 "）"（编号 a) 不算）
+   *   - 不在 codeBlock 内；不递归进 math_inline/math_display（公式内的
+   *     字母天然排除）；带 code mark 的行内代码文本跳过
+   */
+  wrapBareLetters(editor, from, to, notify) {
+    let core = this.getEditorCore(editor);
+    if (!core) {
+      if (notify) {
+        this._notifyTransient("未找到可用的笔记编辑器，请先打开一个笔记");
+      }
+      return 0;
+    }
+    let view = core.view;
+    let state = view.state;
+    let schema = state.schema;
+    if (!schema.nodes.math_inline) {
+      if (notify) {
+        Zotero.alert(null, "笔记格式修复", "当前编辑器 schema 中没有 math_inline 节点，无法修复。");
+      }
+      return 0;
+    }
+    let targets = [];
+    this._collectBareLetters(state.doc, from, to, targets);
+    if (!targets.length) {
+      if (notify) {
+        this._notifyTransient("没有发现裸单字母（选区内没有或均已被 $ 包裹）");
+      }
+      return 0;
+    }
+    // 从后往前替换，避免位置偏移
+    targets.sort((a, b) => b.pos - a.pos);
+    let tr = state.tr;
+    let mathType = schema.nodes.math_inline;
+    for (let t of targets) {
+      tr.replaceWith(t.pos, t.pos + 1, mathType.create({}, schema.text(t.letter)));
+    }
+    try {
+      editor._iframeWindow.wrappedJSObject.__mathFixerBusy = true;
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      view.dispatch(tr.setMeta("addToHistory", true));
+    } catch (e) {
+      view.dispatch(tr);
+    }
+    try {
+      let wj2 = editor._iframeWindow.wrappedJSObject;
+      wj2.setTimeout(
+        Components.utils.exportFunction(
+          function () {
+            wj2.__mathFixerBusy = false;
+          },
+          wj2,
+          { defineAs: "__mathFixerUnbusyBare" },
+        ),
+        60,
+      );
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      editor._iframeWindow.wrappedJSObject.focus();
+    } catch (e) {
+      /* ignore */
+    }
+    if (notify) {
+      this._notifyTransient("已将 " + targets.length + " 个裸单字母转为公式（斜体）");
+    }
+    return targets.length;
+  },
+
+  /**
+   * 遍历文档收集 [from, to] 范围内的裸单字母。
+   * 跨 realm 安全遍历（与 _collectTargets 同一套手工递归），跳过
+   * codeBlock 与 math 节点；位置按原文档计算，调用端从后往前替换。
+   */
+  _collectBareLetters(doc, from, to, out) {
+    let reBare =
+      /(?<![A-Za-z0-9$\\'’])([A-Za-z])(?![A-Za-z0-9$\\])(?!\.[\s　])(?![)）])/g;
+    let visit = (node, contentStart) => {
+      let offset = 0;
+      for (let i = 0; i < node.childCount; i++) {
+        let child = node.child(i);
+        let childPos = contentStart + offset;
+        let name = child.type.name;
+        if (name === "codeBlock" || name === "math_inline" || name === "math_display") {
+          // 整体跳过：代码块与公式内部不参与
+        } else if (name === "text") {
+          let hasCodeMark = false;
+          try {
+            let marks = child.marks || [];
+            for (let mk of marks) {
+              if (mk.type.name === "code") {
+                hasCodeMark = true;
+                break;
+              }
+            }
+          } catch (eMarks) {
+            /* ignore */
+          }
+          if (!hasCodeMark) {
+            let text = child.text || "";
+            if (/[A-Za-z]/.test(text)) {
+              let start = Math.max(0, from - childPos);
+              let end = Math.min(text.length, to - childPos);
+              if (end > start) {
+                reBare.lastIndex = 0;
+                let m;
+                while ((m = reBare.exec(text)) !== null) {
+                  if (m.index >= start && m.index < end) {
+                    out.push({ pos: childPos + m.index, letter: m[1] });
+                  }
+                }
+              }
+            }
+          }
+        } else if (child.childCount > 0) {
+          visit(child, childPos + 1);
+        }
+        offset += child.nodeSize;
+      }
+    };
+    visit(doc, 0);
   },
 
   /* ======================= 定期扫描新编辑器 ======================= */

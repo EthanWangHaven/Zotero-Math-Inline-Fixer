@@ -7,6 +7,7 @@
  */
 
 var MathFixer;
+var MathClipFixer;
 
 function log(msg) {
   try {
@@ -26,8 +27,11 @@ async function startup({ id, version, rootURI }, reason) {
       return;
     }
     Services.scriptloader.loadSubScript(rootURI + "mathfixer.js");
+    Services.scriptloader.loadSubScript(rootURI + "clipfix.js");
     MathFixer.init({ id, version, rootURI });
     MathFixer.addToAllWindows();
+    MathClipFixer.init({ id, version, rootURI });
+    MathClipFixer.addToAllWindows();
     log("startup 完成 id=" + id + " version=" + version);
   } catch (e) {
     log("startup 出错: " + (e && e.message ? e.message : e));
@@ -49,7 +53,10 @@ function shutdown({ id, version, rootURI }, reason) {
     }
     MathFixer.removeFromAllWindows();
     MathFixer.uninit();
+    MathClipFixer.removeFromAllWindows();
+    MathClipFixer.uninit();
     MathFixer = undefined;
+    MathClipFixer = undefined;
     log("shutdown 完成");
   } catch (e) {
     log("shutdown 出错: " + (e && e.message ? e.message : e));
