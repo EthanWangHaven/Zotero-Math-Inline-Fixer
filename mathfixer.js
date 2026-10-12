@@ -139,55 +139,9 @@ var MathFixer = {
     }
     let doc = win.document;
 
-    // Tools 菜单项：每次调用都确保存在（幂等）。
-    // 不能依赖 _windows 集合做短路——若窗口初始化早期 popup 尚未就绪，
-    // 一次性失败会让菜单项永远丢失，表现为「插件失联」。
-    let toolsPopup =
-      doc.getElementById("menu_ToolsPopup") || doc.getElementById("menu_toolsPopup");
-    if (toolsPopup && !toolsPopup.querySelector("#mathfixer-tools-menuitem")) {
-      try {
-        let mi = doc.createXULElement
-          ? doc.createXULElement("menuitem")
-          : doc.createElement("menuitem");
-        mi.id = "mathfixer-tools-menuitem";
-        mi.setAttribute("label", "笔记格式修复 (Ctrl+Shift+M)");
-        mi.addEventListener("command", () => this.fixActiveEditor(win, true));
-        toolsPopup.appendChild(mi);
-        Zotero.debug("[MathFixer] 已（重新）挂上 Tools 菜单项");
-      } catch (e) {
-        /* ignore */
-      }
-    }
-
-    // 裸字母转公式：选区 / 全文（幂等）
-    if (toolsPopup && !toolsPopup.querySelector("#mathfixer-tools-bare-sel")) {
-      try {
-        let miB1 = doc.createXULElement
-          ? doc.createXULElement("menuitem")
-          : doc.createElement("menuitem");
-        miB1.id = "mathfixer-tools-bare-sel";
-        miB1.setAttribute("label", "裸字母转公式（选区）(Ctrl+Alt+S)");
-        miB1.addEventListener("command", () => this.wrapBareLettersActive(win, true, false));
-        toolsPopup.appendChild(miB1);
-        Zotero.debug("[MathFixer] 已挂上裸字母转公式菜单（选区）");
-      } catch (e) {
-        Zotero.debug("[MathFixer] 挂裸字母菜单（选区）失败: " + (e && e.message ? e.message : e));
-      }
-    }
-    if (toolsPopup && !toolsPopup.querySelector("#mathfixer-tools-bare-all")) {
-      try {
-        let miB2 = doc.createXULElement
-          ? doc.createXULElement("menuitem")
-          : doc.createElement("menuitem");
-        miB2.id = "mathfixer-tools-bare-all";
-        miB2.setAttribute("label", "裸字母转公式（全文）");
-        miB2.addEventListener("command", () => this.wrapBareLettersActive(win, true, true));
-        toolsPopup.appendChild(miB2);
-        Zotero.debug("[MathFixer] 已挂上裸字母转公式菜单（全文）");
-      } catch (e) {
-        Zotero.debug("[MathFixer] 挂裸字母菜单（全文）失败: " + (e && e.message ? e.message : e));
-      }
-    }
+    // 说明：Tools 菜单不再挂本模块条目，唯一入口为 clipfix 的
+    // 「Math Fixer」（显示/隐藏悬浮胶囊）；本模块快捷键 Ctrl+Shift+M 保留
+    // 裸字母转公式菜单已移交悬浮胶囊（clipfix），此处不再挂载
 
     // 快捷键 Ctrl+Shift+M：以 win.__mathFixerKeyDown 为幂等标志（防重复注册）
     if (!win.__mathFixerKeyDown) {
@@ -248,11 +202,7 @@ var MathFixer = {
     }
     try {
       let doc = win.document;
-      doc
-        .querySelectorAll(
-          "#mathfixer-tools-menuitem, #mathfixer-tools-bare-sel, #mathfixer-tools-bare-all",
-        )
-        .forEach((el) => el.remove());
+      // Tools 菜单条目已移交 clipfix（胶囊），无需清理
     } catch (e) {
       /* ignore */
     }
@@ -269,8 +219,19 @@ var MathFixer = {
 
   /* ======================= 编辑器获取 ======================= */
 
-  /** 找到当前活动的笔记编辑器实例 */
+  /**
+   * 找到当前活动的笔记编辑器实例。
+   * Zotero.Notes._editorInstances 可能同时持有多个实例（笔记标签页 +
+   * 条目面板笔记等），固定取第一个会读到别的笔记的空选区，导致
+   * 「已选中文字却提示请先选中」（1.6.1 实测）。按以下优先级判定：
+   *   1. iframe 实际持有焦点（document.hasFocus()）
+   *   2. 有非空选区的实例——点胶囊按钮会把焦点移出编辑器，但
+   *      ProseMirror 的选区仍保留在 state 里，可据此认出目标笔记；
+   *      仅当恰好一个实例有选区时采用（多个则无法唯一确定）
+   *   3. 兜底：最新打开的存活实例（数组尾部）
+   */
   findActiveEditor() {
+    let alive = [];
     try {
       let instances = Zotero.Notes._editorInstances || [];
       for (let e of instances) {
@@ -280,7 +241,7 @@ var MathFixer = {
             e._iframeWindow &&
             !Components.utils.isDeadWrapper(e._iframeWindow)
           ) {
-            return e;
+            alive.push(e);
           }
         } catch (err) {
           /* ignore */
@@ -289,7 +250,38 @@ var MathFixer = {
     } catch (e) {
       /* ignore */
     }
-    return null;
+    if (!alive.length) {
+      return null;
+    }
+    // 1. 焦点所在实例
+    for (let e of alive) {
+      try {
+        let wj = e._iframeWindow.wrappedJSObject;
+        if (wj && wj.document && wj.document.hasFocus && wj.document.hasFocus()) {
+          return e;
+        }
+      } catch (err) {
+        /* ignore */
+      }
+    }
+    // 2. 恰好一个实例带非空选区 → 它就是用户正在操作的笔记
+    let withSel = [];
+    for (let e of alive) {
+      try {
+        let core = this.getEditorCore(e);
+        let sel = core && core.view && core.view.state ? core.view.state.selection : null;
+        if (sel && !sel.empty) {
+          withSel.push(e);
+        }
+      } catch (err) {
+        /* ignore */
+      }
+    }
+    if (withSel.length === 1) {
+      return withSel[0];
+    }
+    // 3. 兜底：最新的存活实例
+    return alive[alive.length - 1];
   },
 
   /** 拿到编辑器核心 { view, state, schema }（跨 realm 安全） */

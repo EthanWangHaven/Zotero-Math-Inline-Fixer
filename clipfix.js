@@ -30,6 +30,11 @@ var MathClipFixer = {
   _PREF_TEXT: "extensions.mathfixer.clipPanelText",
   _PREF_GEOM: "extensions.mathfixer.clipPanelGeom",
   _PREF_AUTOCOPY: "extensions.mathfixer.clipPanelAutoCopy",
+  _PREF_CAP_EXITED: "extensions.mathfixer.capsuleExited",
+  _PREF_CAP_COLOR: "extensions.mathfixer.capsuleColor",
+  _PREF_CAP_ONTOP: "extensions.mathfixer.capsuleOnTop",
+  _PREF_CAP_POS: "extensions.mathfixer.capsulePos",
+  _PREF_CAP_MODE: "extensions.mathfixer.capsuleMode",
 
   init({ id, version, rootURI }) {
     this.id = id;
@@ -47,6 +52,37 @@ var MathClipFixer = {
     } catch (e) {
       Zotero.debug("[MathFixer][Clip] 剪贴板读取自检出错: " + (e && e.message ? e.message : e));
     }
+    // 自愈轮询：主窗口 DOM 晚于插件就绪时，定时补挂工具栏图标与胶囊
+    this.startSelfHeal();
+  },
+
+  /** 自愈轮询：每 2s 检查一次胶囊是否在位，缺失则补挂 */
+  startSelfHeal() {
+    if (this._healTimer) {
+      return;
+    }
+    let logged = false;
+    this._healTimer = setInterval(() => {
+      try {
+        for (let win of Zotero.getMainWindows()) {
+          this.addToWindow(win);
+        }
+        let win = Zotero.getMainWindow();
+        if (win && win.document) {
+          let hasCap = !!win.document.getElementById("mathfixer-capsule");
+          if (hasCap || logged) {
+            return;
+          }
+          logged = true;
+          Zotero.debug(
+            "[MathFixer][Clip] 自愈检查：capsule=" + hasCap +
+              "（DOM 就绪后自动补挂）",
+          );
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    }, 2000);
   },
 
   uninit() {
@@ -601,42 +637,24 @@ var MathClipFixer = {
     }
     let doc = win.document;
 
-    // 主工具栏按钮：点击打开/隐藏转换窗口（幂等）
-    let toolbar = doc.getElementById("zotero-toolbar");
-    if (toolbar && !toolbar.querySelector("#mathclipfixer-toolbarbutton")) {
-      try {
-        let btn = doc.createXULElement
-          ? doc.createXULElement("toolbarbutton")
-          : doc.createElement("toolbarbutton");
-        btn.id = "mathclipfixer-toolbarbutton";
-        btn.setAttribute("label", "笔记格式转换");
-        btn.setAttribute("tooltiptext", "打开/隐藏 Zotero 笔记格式转换窗口（Ctrl+Alt+A）");
-        btn.setAttribute("class", "toolbarbutton-1");
-        btn.addEventListener("command", () => this.toggleWindow());
-        toolbar.appendChild(btn);
-        Zotero.debug("[MathFixer][Clip] 已（重新）挂上工具栏按钮");
-      } catch (e) {
-        /* ignore */
-      }
-    }
-
-    // Tools 菜单：两项（幂等）
+    // 说明：不再使用 Zotero 工具栏按钮（图标模式/节点结构不可靠），
+    // 也不再用绿色唤回钮（1.7.x 的过渡方案，已按反馈移除）。
+    // 入口收敛为：Tools 菜单 Math Fixer（只负责显示）+ Ctrl+Alt+F（开关）
     let toolsPopup =
       doc.getElementById("menu_ToolsPopup") || doc.getElementById("menu_toolsPopup");
     if (toolsPopup) {
       try {
-        if (!toolsPopup.querySelector("#mathclipfixer-tools-window")) {
+        if (!toolsPopup.querySelector("#mathclipfixer-tools-capsule")) {
           let mi = doc.createXULElement
             ? doc.createXULElement("menuitem")
             : doc.createElement("menuitem");
-          mi.id = "mathclipfixer-tools-window";
-          mi.setAttribute("label", "笔记格式转换窗口 (Ctrl+Alt+A)");
-          mi.addEventListener("command", () => this.toggleWindow());
+          mi.id = "mathclipfixer-tools-capsule";
+          mi.setAttribute("label", "Math Fixer");
+          mi.addEventListener("command", () => this.showCapsule());
           toolsPopup.appendChild(mi);
         }
-        Zotero.debug("[MathFixer][Clip] 已（重新）挂上 Tools 菜单项");
       } catch (e) {
-        /* ignore */
+        Zotero.debug("[MathFixer][Clip] 挂 Tools 菜单项失败: " + (e && e.message ? e.message : e));
       }
     }
 
@@ -658,11 +676,22 @@ var MathClipFixer = {
             }
             win.__mathClipFixerLastWin = now;
             this.toggleWindow();
+          } else if (event.key === "F" || event.key === "f") {
+            event.preventDefault();
+            event.stopPropagation();
+            this.toggleCapsule();
           }
         }
       };
       win.addEventListener("keydown", onKeyDown, true);
       win.__mathClipFixerKeyDown = onKeyDown;
+    }
+
+    // 构建悬浮胶囊（幂等；尊重「退出」状态）
+    try {
+      this.buildCapsule(win);
+    } catch (eCap) {
+      Zotero.debug("[MathFixer][Clip] 构建胶囊失败: " + (eCap && eCap.message ? eCap.message : eCap));
     }
 
     this._windows.add(win);
@@ -675,8 +704,12 @@ var MathClipFixer = {
     try {
       let doc = win.document;
       doc
-        .querySelectorAll("#mathclipfixer-toolbarbutton, #mathclipfixer-tools-window")
+        .querySelectorAll("#mathclipfixer-tools-capsule, #mathfixer-capsule-handle")
         .forEach((el) => el.remove());
+      let capOld = doc.getElementById("mathfixer-capsule");
+      if (capOld) {
+        capOld.remove();
+      }
     } catch (e) {
       /* ignore */
     }
@@ -1138,4 +1171,775 @@ var MathClipFixer = {
     }
   },
 
+  /* ======================= 悬浮胶囊 ======================= */
+
+  _CAP_THEMES: {
+    glass: { label: "白色磨砂（默认）", bg: "rgba(255,255,255,0.78)", text: "#111827", border: "rgba(120,130,140,0.45)", blur: true },
+    dark: { label: "深灰磨砂", bg: "rgba(32,34,38,0.82)", text: "#f2f4f6", border: "rgba(255,255,255,0.18)", blur: true },
+    white: { label: "纯白", bg: "#ffffff", text: "#1f2937", border: "#e2e5e9", blur: false },
+    black: { label: "纯黑", bg: "#14161a", text: "#f2f4f6", border: "#2c2f34", blur: false },
+    green: { label: "墨绿", bg: "rgba(20,90,60,0.92)", text: "#ffffff", border: "rgba(255,255,255,0.25)", blur: false },
+    blue: { label: "深蓝", bg: "rgba(25,70,160,0.92)", text: "#ffffff", border: "rgba(255,255,255,0.25)", blur: false },
+  },
+
+  /**
+   * 图标：用 createElementNS(SVG) 逐节点构建。
+   * 不用 innerHTML——Zotero 10 主窗口文档（XUL 环境）里 innerHTML
+   * 写入的 svg 不进入 SVG 命名空间，会渲染成空白（1.5.4 实测）。
+   * currentColor 随主题变色。
+   */
+  _capSvgEl(act, doc) {
+    const S = "http://www.w3.org/2000/svg";
+    let svg = doc.createElementNS(S, "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.9");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("width", "17");
+    svg.setAttribute("height", "17");
+    let mk = function (t, attrs) {
+      let el = doc.createElementNS(S, t);
+      for (let k in attrs) {
+        el.setAttribute(k, attrs[k]);
+      }
+      svg.appendChild(el);
+    };
+    if (act === "conv") {
+      mk("path", { d: "M3 6h7m0 0L8 4m2 2-2 2M13 10H6m0 0 2-2m-2 2 2 2" });
+    } else if (act === "fix") {
+      mk("path", {
+        d: "M3 13 10 6m0 0-1.6-1.6M10 6l1.6 1.6M12.5 2.5l.7.7M13.6 5.4l.9-.2M11 3.2l.2-.9",
+      });
+    } else if (act === "baresel") {
+      mk("rect", { x: 3, y: 3, width: 10, height: 10, rx: 1.5, "stroke-dasharray": "2.6 2.2" });
+    } else if (act === "bareall") {
+      mk("rect", { x: 3, y: 2.5, width: 10, height: 11, rx: 1.5 });
+      mk("path", { d: "M5.5 5.5h5M5.5 8h5M5.5 10.5h3" });
+    } else if (act === "settings") {
+      mk("circle", { cx: 8, cy: 8, r: 2.4 });
+      mk("path", {
+        d: "M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6 5 5M11 11l1.4 1.4M12.4 3.6 11 5M5 11 3.6 12.4",
+      });
+    }
+    return svg;
+  },
+
+  _capPref(name, defVal) {
+    try {
+      let v = Zotero.Prefs.get(name, true);
+      return v === undefined || v === null ? defVal : v;
+    } catch (e) {
+      return defVal;
+    }
+  },
+
+  /** 显示/隐藏胶囊（持久记忆） */
+  _setCapsuleVisible(win, visible) {
+    try {
+      let doc = win.document;
+      let cap = doc.getElementById("mathfixer-capsule");
+      if (!cap) {
+        this.buildCapsule(win);
+        cap = doc.getElementById("mathfixer-capsule");
+      }
+      if (!cap) {
+        return;
+      }
+      cap.style.display = visible ? "flex" : "none";
+      try {
+        Zotero.Prefs.set(this._PREF_CAP_EXITED, !visible, true);
+      } catch (e) {
+        /* ignore */
+      }
+      Zotero.debug("[MathFixer][Clip] 胶囊已" + (visible ? "显示" : "隐藏"));
+    } catch (e) {
+      Zotero.debug(
+        "[MathFixer][Clip] 设置胶囊可见性失败: " + (e && e.message ? e.message : e),
+      );
+    }
+  },
+
+  /** 显示/隐藏胶囊（Ctrl+Alt+F 入口，开关语义） */
+  toggleCapsule() {
+    try {
+      let win = Zotero.getMainWindow();
+      if (!win || !win.document) {
+        return;
+      }
+      let cap = win.document.getElementById("mathfixer-capsule");
+      if (!cap) {
+        this.buildCapsule(win);
+        cap = win.document.getElementById("mathfixer-capsule");
+      }
+      if (!cap) {
+        return;
+      }
+      let visible = cap.style.display !== "none";
+      this._setCapsuleVisible(win, !visible);
+    } catch (e) {
+      Zotero.debug(
+        "[MathFixer][Clip] 切换胶囊失败: " + (e && e.message ? e.message : e),
+      );
+    }
+  },
+
+  /**
+   * 只显示胶囊（Tools 菜单 Math Fixer 入口）。
+   * 不做开关切换：胶囊正显示时再点菜单不应该把它藏起来
+   *（1.7.1 实测：toggle 语义让用户"点了菜单反而只见唤回钮"）。
+   */
+  showCapsule() {
+    try {
+      let win = Zotero.getMainWindow();
+      if (!win || !win.document) {
+        return;
+      }
+      let cap = win.document.getElementById("mathfixer-capsule");
+      if (!cap) {
+        this.buildCapsule(win);
+        cap = win.document.getElementById("mathfixer-capsule");
+      }
+      if (!cap) {
+        return;
+      }
+      this._setCapsuleVisible(win, true);
+    } catch (e) {
+      Zotero.debug(
+        "[MathFixer][Clip] 显示胶囊失败: " + (e && e.message ? e.message : e),
+      );
+    }
+  },
+
+  /** 胶囊按钮 → 对应功能 */
+  _capRun(act, win) {
+    try {
+      if (act === "conv") {
+        this.toggleWindow();
+        return;
+      }
+      let mf = Zotero.MathFixer;
+      if (!mf) {
+        this._notifyTransient("MathFixer 模块未就绪，请重启 Zotero");
+        return;
+      }
+      if (act === "fix") {
+        mf.fixActiveEditor(win, true);
+      } else if (act === "baresel") {
+        mf.wrapBareLettersActive(win, true, false);
+      } else if (act === "bareall") {
+        mf.wrapBareLettersActive(win, true, true);
+      }
+    } catch (e) {
+      Zotero.debug(
+        "[MathFixer][Clip] 胶囊按钮执行失败: " + (e && e.message ? e.message : e),
+      );
+    }
+  },
+
+  /** 主题与置顶应用（全内联样式，无 CSS 类依赖） */
+  _applyCapTheme(cap, menu) {
+    try {
+      let key = this._capPref(this._PREF_CAP_COLOR, "glass");
+      let th = this._CAP_THEMES[key] || this._CAP_THEMES.glass;
+      let blur = th.blur ? "blur(14px) saturate(1.5)" : "none";
+      cap.style.background = th.bg;
+      cap.style.color = th.text;
+      cap.style.border = "1px solid " + th.border;
+      cap.style.backdropFilter = blur;
+      if (menu) {
+        menu.style.background = th.bg;
+        menu.style.color = th.text;
+        menu.style.border = "1px solid " + th.border;
+        menu.style.backdropFilter = blur;
+      }
+      let onTop = this._capPref(this._PREF_CAP_ONTOP, true) === true;
+      cap.style.zIndex = onTop ? "2147483647" : "9999";
+    } catch (e) {
+      /* ignore */
+    }
+  },
+
+  /** 在主窗口构建悬浮胶囊（幂等；失败清理半成品，交由自愈轮询重建） */
+  buildCapsule(win) {
+    let doc = win.document;
+    if (!doc || !doc.documentElement || doc.getElementById("mathfixer-capsule")) {
+      return;
+    }
+    try {
+      this._buildCapsuleInner(win, doc);
+    } catch (eBuild) {
+      try {
+        let broken = doc.getElementById("mathfixer-capsule");
+        if (broken) {
+          broken.remove();
+        }
+      } catch (eClean) {
+        /* ignore */
+      }
+      throw eBuild;
+    }
+  },
+
+  /**
+   * 构建胶囊主体。全部内联样式 + JS hover，不依赖 <style> 元素
+   * （Zotero 10 主窗口对 <style>/doc.head 的支持不可靠，1.5.4 实测）。
+   */
+  _buildCapsuleInner(win, doc) {
+    const X = "http://www.w3.org/1999/xhtml";
+    let self = this;
+    let suppressClick = false;
+    // 布局模式："h" 横向条 / "v" 竖向条 / "mini" 最小化（只留设置圆钮）
+    let mode = self._capPref(self._PREF_CAP_MODE, "h");
+    if (["h", "v", "mini"].indexOf(mode) < 0) {
+      mode = "h";
+    }
+    let funcBtns = []; // 四个功能按钮引用（最小化时隐藏）
+
+    let cap = doc.createElementNS(X, "div");
+    cap.id = "mathfixer-capsule";
+    Object.assign(cap.style, {
+      position: "fixed",
+      display: "flex",
+      alignItems: "center",
+      gap: "2px",
+      padding: "5px 8px",
+      borderRadius: "999px",
+      boxShadow: "0 4px 18px rgba(0,0,0,.18)",
+      userSelect: "none",
+      MozUserSelect: "none",
+      cursor: "default",
+      // 关键：退出 Zotero 自定义标题栏的窗口拖动接管，
+      // 否则胶囊拖到顶部区域后，按住胶囊会拖动整个窗口
+      MozWindowDragging: "no-drag",
+    });
+
+    let mkBtn = function (act, tip) {
+      let b = doc.createElementNS(X, "div");
+      b.title = tip;
+      b.setAttribute("data-act", act);
+      Object.assign(b.style, {
+        width: "28px",
+        height: "28px",
+        borderRadius: "50%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        cursor: "pointer",
+        color: "inherit",
+        MozWindowDragging: "no-drag",
+      });
+      b.appendChild(self._capSvgEl(act, doc));
+      funcBtns.push(b);
+      b.addEventListener("mouseenter", function () {
+        b.style.background = "rgba(127,127,127,0.35)";
+      });
+      b.addEventListener("mouseleave", function () {
+        b.style.background = "transparent";
+      });
+      b.addEventListener("click", function (e) {
+        e.stopPropagation();
+        if (suppressClick) {
+          return; // 拖动结束后的误触
+        }
+        self._capRun(act, win);
+      });
+      return b;
+    };
+
+    cap.appendChild(mkBtn("conv", "笔记格式转换窗口 (Ctrl+Alt+A)"));
+    cap.appendChild(mkBtn("fix", "笔记格式修复 (Ctrl+Shift+M)"));
+    cap.appendChild(mkBtn("baresel", "裸字母转公式（选区）(Ctrl+Alt+S)"));
+    cap.appendChild(mkBtn("bareall", "裸字母转公式（全文）"));
+
+    let sep = doc.createElementNS(X, "div");
+    Object.assign(sep.style, {
+      width: "1px",
+      height: "18px",
+      background: "rgba(127,127,127,0.4)",
+      margin: "0 3px",
+    });
+    cap.appendChild(sep);
+
+    let gear = doc.createElementNS(X, "div");
+    gear.title = "设置";
+    Object.assign(gear.style, {
+      width: "28px",
+      height: "28px",
+      borderRadius: "50%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      cursor: "pointer",
+      color: "inherit",
+    });
+    gear.style.MozWindowDragging = "no-drag";
+    gear.appendChild(self._capSvgEl("settings", doc));
+    gear.addEventListener("mouseenter", function () {
+      gear.style.background = "rgba(127,127,127,0.35)";
+    });
+    gear.addEventListener("mouseleave", function () {
+      gear.style.background = "transparent";
+    });
+    cap.appendChild(gear);
+
+    // 设置菜单（显示/隐藏用内联 display，不用 hidden 属性）
+    let menu = doc.createElementNS(X, "div");
+    // 拖动排除（mousedown 内 closest("#mcf-cap-menu")）依赖此 id，
+    // 缺了它设置菜单里按下鼠标会拖走整个胶囊（1.6.0 及之前漏加）
+    menu.id = "mcf-cap-menu";
+    Object.assign(menu.style, {
+      position: "absolute",
+      bottom: "calc(100% + 10px)",
+      right: "0",
+      minWidth: "232px",
+      borderRadius: "10px",
+      padding: "6px",
+      display: "none",
+      flexDirection: "column",
+      gap: "2px",
+      boxShadow: "0 8px 28px rgba(0,0,0,.22)",
+      zIndex: "2147483647",
+    });
+
+    let mkItem = function () {
+      let it = doc.createElementNS(X, "div");
+      Object.assign(it.style, {
+        padding: "6px 10px",
+        borderRadius: "7px",
+        cursor: "pointer",
+        fontSize: "12.5px",
+        display: "flex",
+        alignItems: "center",
+        gap: "8px",
+      });
+      it.addEventListener("mouseenter", function () {
+        it.style.background = "rgba(127,127,127,0.22)";
+      });
+      it.addEventListener("mouseleave", function () {
+        it.style.background = "transparent";
+      });
+      return it;
+    };
+
+    // 布局切换：横向 / 竖向 / 最小化（最小化 = 只剩设置圆钮）
+    let modeRow = doc.createElementNS(X, "div");
+    Object.assign(modeRow.style, {
+      display: "flex",
+      alignItems: "center",
+      flexWrap: "nowrap",
+      gap: "6px",
+      padding: "6px 10px",
+    });
+    let modeLabel = doc.createElementNS(X, "span");
+    modeLabel.textContent = "布局";
+    Object.assign(modeLabel.style, {
+      fontSize: "12.5px",
+      whiteSpace: "nowrap",
+    });
+    modeRow.appendChild(modeLabel);
+    let modePills = {};
+    let refreshModePills = function () {
+      for (let k in modePills) {
+        let p = modePills[k];
+        if (k === mode) {
+          p.style.background = "rgba(22,163,74,0.22)";
+          p.style.borderColor = "#16a34a";
+        } else {
+          p.style.background = "transparent";
+          p.style.borderColor = "rgba(127,127,127,.45)";
+        }
+      }
+    };
+    let modeDefs = [["h", "横向"], ["v", "竖向"], ["mini", "最小化"]];
+    for (let md of modeDefs) {
+      let pill = doc.createElementNS(X, "div");
+      pill.textContent = md[1];
+      pill.title =
+        md[0] === "mini"
+          ? "收成一个只带设置的小圆钮，点设置可展开"
+          : "把胶囊排成" + md[1] + "布局";
+      Object.assign(pill.style, {
+        padding: "3px 8px",
+        minWidth: "48px",
+        boxSizing: "border-box",
+        textAlign: "center",
+        whiteSpace: "nowrap",
+        flexShrink: "0",
+        borderRadius: "999px",
+        fontSize: "12px",
+        cursor: "pointer",
+        border: "1px solid rgba(127,127,127,.45)",
+        userSelect: "none",
+      });
+      pill.addEventListener("click", function (e) {
+        e.stopPropagation();
+        mode = md[0];
+        try {
+          Zotero.Prefs.set(self._PREF_CAP_MODE, mode, true);
+        } catch (eMode) {
+          /* ignore */
+        }
+        refreshModePills();
+        applyMode();
+        placeMenu();
+        if (mode === "mini" && menu.style.display === "flex") {
+          armMiniAutoClose();
+        } else {
+          disarmMiniAutoClose();
+        }
+        Zotero.debug("[MathFixer][Clip] 胶囊布局切换为 " + mode);
+      });
+      modePills[md[0]] = pill;
+      modeRow.appendChild(pill);
+    }
+    menu.appendChild(modeRow);
+
+    let itemExit = mkItem();
+    itemExit.textContent = "退出（Tools 菜单 Math Fixer / Ctrl+Alt+F 可唤回）";
+    menu.appendChild(itemExit);
+
+    let itemTop = mkItem();
+    let chkTop = doc.createElementNS(X, "input");
+    chkTop.type = "checkbox";
+    let lblTop = doc.createElementNS(X, "span");
+    lblTop.textContent = "始终悬浮在最上层";
+    itemTop.appendChild(chkTop);
+    itemTop.appendChild(lblTop);
+    menu.appendChild(itemTop);
+
+    let colorRow = doc.createElementNS(X, "div");
+    Object.assign(colorRow.style, { display: "flex", gap: "6px", padding: "6px 10px 4px" });
+    menu.appendChild(colorRow);
+
+    cap.appendChild(menu);
+    doc.documentElement.appendChild(cap);
+
+    // ===== 布局应用 / 菜单定位 / 最小化自动折叠 =====
+    // applyMode：按 mode 切换胶囊排布（h 横条 / v 竖条 / mini 圆钮）
+    let applyMode = function () {
+      try {
+        if (mode === "mini") {
+          for (let b of funcBtns) {
+            b.style.display = "none";
+          }
+          sep.style.display = "none";
+          cap.style.flexDirection = "row";
+          cap.style.padding = "5px 6px";
+        } else if (mode === "v") {
+          for (let b of funcBtns) {
+            b.style.display = "flex";
+          }
+          sep.style.display = "block";
+          sep.style.width = "18px";
+          sep.style.height = "1px";
+          sep.style.margin = "3px 0";
+          cap.style.flexDirection = "column";
+          cap.style.padding = "8px 5px";
+        } else {
+          for (let b of funcBtns) {
+            b.style.display = "flex";
+          }
+          sep.style.display = "block";
+          sep.style.width = "1px";
+          sep.style.height = "18px";
+          sep.style.margin = "0 3px";
+          cap.style.flexDirection = "row";
+          cap.style.padding = "5px 8px";
+        }
+        // 模式切换后尺寸变化，把胶囊重新钳制回窗口内
+        cap.style.left =
+          Math.max(0, Math.min(cap.offsetLeft, win.innerWidth - 60)) + "px";
+        cap.style.top =
+          Math.max(0, Math.min(cap.offsetTop, win.innerHeight - 50)) + "px";
+      } catch (eApply) {
+        /* ignore */
+      }
+    };
+    // placeMenu：按胶囊形态与在窗口中的位置自适应弹出方向
+    //（竖条向侧边弹，横条向上下弹，靠边时自动翻面）
+    let placeMenu = function () {
+      try {
+        if (mode === "v") {
+          menu.style.top = "0";
+          menu.style.bottom = "auto";
+          if (cap.offsetLeft > win.innerWidth - 250) {
+            menu.style.right = "calc(100% + 10px)";
+            menu.style.left = "auto";
+          } else {
+            menu.style.left = "calc(100% + 10px)";
+            menu.style.right = "auto";
+          }
+        } else {
+          menu.style.right = "0";
+          menu.style.left = "auto";
+          if (cap.offsetTop > win.innerHeight - 260) {
+            menu.style.bottom = "calc(100% + 10px)";
+            menu.style.top = "auto";
+          } else {
+            menu.style.top = "calc(100% + 10px)";
+            menu.style.bottom = "auto";
+          }
+        }
+      } catch (ePlace) {
+        /* ignore */
+      }
+    };
+    // 最小化模式：菜单打开后无操作 4 秒自动折叠；胶囊上有鼠标活动即刷新
+    let miniAutoTimer = null;
+    let armMiniAutoClose = function () {
+      if (mode !== "mini") {
+        return;
+      }
+      if (miniAutoTimer) {
+        win.clearTimeout(miniAutoTimer);
+      }
+      miniAutoTimer = win.setTimeout(function () {
+        miniAutoTimer = null;
+        menu.style.display = "none";
+      }, 4000);
+    };
+    let disarmMiniAutoClose = function () {
+      if (miniAutoTimer) {
+        win.clearTimeout(miniAutoTimer);
+        miniAutoTimer = null;
+      }
+    };
+    // 菜单是胶囊子节点，其上的 mousemove 会冒泡到这里
+    cap.addEventListener("mousemove", function () {
+      if (mode === "mini" && menu.style.display === "flex") {
+        armMiniAutoClose();
+      }
+    });
+
+    // 设置按钮：开/关菜单（自适应弹出方向；最小化模式下无操作自动折叠）
+    gear.addEventListener("click", function (e) {
+      e.stopPropagation();
+      chkTop.checked = self._capPref(self._PREF_CAP_ONTOP, true) === true;
+      if (menu.style.display !== "flex") {
+        placeMenu();
+        menu.style.display = "flex";
+        if (mode === "mini") {
+          armMiniAutoClose();
+        }
+      } else {
+        menu.style.display = "none";
+        disarmMiniAutoClose();
+      }
+    });
+    // 退出
+    itemExit.addEventListener("click", function (e) {
+      e.stopPropagation();
+      menu.style.display = "none";
+      self._setCapsuleVisible(win, false);
+      self._notifyTransient("胶囊已退出：Tools 菜单 Math Fixer 或 Ctrl+Alt+F 可重新打开");
+    });
+    itemTop.addEventListener("click", function (e) {
+      e.stopPropagation();
+    });
+    chkTop.addEventListener("change", function () {
+      try {
+        Zotero.Prefs.set(self._PREF_CAP_ONTOP, chkTop.checked, true);
+      } catch (eT) {
+        /* ignore */
+      }
+      self._applyCapTheme(cap, menu);
+    });
+    // 颜色预设
+    let colorKey = self._capPref(self._PREF_CAP_COLOR, "glass");
+    if (!self._CAP_THEMES[colorKey]) {
+      colorKey = "glass";
+    }
+    for (let key of Object.keys(self._CAP_THEMES)) {
+      let th = self._CAP_THEMES[key];
+      let sw = doc.createElementNS(X, "div");
+      sw.title = th.label;
+      Object.assign(sw.style, {
+        width: "18px",
+        height: "18px",
+        borderRadius: "50%",
+        cursor: "pointer",
+        border: "1.5px solid rgba(127,127,127,.5)",
+        background: th.bg,
+      });
+      if (key === colorKey) {
+        sw.style.outline = "2px solid #16a34a";
+        sw.style.outlineOffset = "1px";
+      }
+      sw.addEventListener("click", function (e) {
+        e.stopPropagation();
+        try {
+          Zotero.Prefs.set(self._PREF_CAP_COLOR, key, true);
+        } catch (eC) {
+          /* ignore */
+        }
+        let all = colorRow.children;
+        for (let i = 0; i < all.length; i++) {
+          all[i].style.outline = "none";
+        }
+        sw.style.outline = "2px solid #16a34a";
+        sw.style.outlineOffset = "1px";
+        self._applyCapTheme(cap, menu);
+      });
+      colorRow.appendChild(sw);
+    }
+    // 点击胶囊外任意处关闭设置菜单
+    doc.addEventListener("click", function () {
+      menu.style.display = "none";
+      disarmMiniAutoClose();
+    });
+
+    // 位置：记忆或默认右上角
+    let pos = null;
+    try {
+      let raw = self._capPref(self._PREF_CAP_POS, null);
+      pos = raw ? JSON.parse(raw) : null;
+    } catch (eP) {
+      pos = null;
+    }
+    // 拖动上界：工具栏（含标签页栏）下缘，防止胶囊进入窗口拖动区
+    let getTopLimit = function () {
+      try {
+        let tb =
+          doc.getElementById("zotero-toolbar") ||
+          doc.querySelector('toolbar[id^="zotero"]');
+        if (tb && tb.getBoundingClientRect) {
+          return Math.max(0, tb.getBoundingClientRect().bottom + 2);
+        }
+      } catch (eLim) {
+        /* ignore */
+      }
+      return 0;
+    };
+    let restoreLimit = getTopLimit();
+    if (pos && typeof pos.x === "number") {
+      cap.style.left = Math.max(0, Math.min(pos.x, win.innerWidth - 60)) + "px";
+      cap.style.top =
+        Math.max(restoreLimit, Math.min(pos.y, win.innerHeight - 50)) + "px";
+    } else {
+      cap.style.left = Math.max(0, win.innerWidth - 260) + "px";
+      cap.style.top = Math.max(restoreLimit, 64) + "px";
+    }
+
+    // 拖动：mousedown 挂在胶囊上，mousemove/mouseup 挂在窗口（捕获阶段），
+    // 5px 阈值区分点击与拖动。针对"拖着拖着突然向某个方向窜出一段"：
+    //   a) 冻结-回跳：光标划到笔记编辑器等 iframe 上方时父窗口收不到
+    //      mouse 事件，胶囊冻结；光标回到主窗口后按"起点+位移"一次性
+    //      补位，看起来就是突然窜出一段距离。→ 拖动确立后
+    //      setPointerCapture 接管指针，iframe 上方的事件也强制派发给胶囊
+    //   b) 残响拉扯：在 iframe 上方或窗外松开鼠标时 mouseup 被吞，残留
+    //      监听会在后续移动中继续拉扯。→ mousemove 里校验 ev.buttons，
+    //      按键已不在按下状态就立即结束；且每次 mousedown 先清残留
+    let lastPointerDownId = null;
+    cap.addEventListener("pointerdown", function (e) {
+      if (e.button === 0) {
+        lastPointerDownId = e.pointerId; // pointerdown 先于 mousedown 到达
+      }
+    });
+    let dragActive = null; // 当前一轮拖动的 {move, up}，非空说明监听仍在位
+    cap.addEventListener("mousedown", function (e) {
+      if (e.button !== 0) {
+        return;
+      }
+      if (e.target.closest && e.target.closest("#mcf-cap-menu")) {
+        return;
+      }
+      e.preventDefault(); // 阻断原生拖拽/文本选择等默认行为
+      // 清理上一轮残留（mouseup 被吞时 dragActive 非空）
+      if (dragActive) {
+        win.removeEventListener("mousemove", dragActive.move, true);
+        win.removeEventListener("mouseup", dragActive.up, true);
+        win.removeEventListener("blur", dragActive.up, true);
+        dragActive = null;
+      }
+      let startX = e.clientX;
+      let startY = e.clientY;
+      let ox = cap.offsetLeft;
+      let oy = cap.offsetTop;
+      let dragging = false;
+      let topLimit = getTopLimit();
+      let pid = e.pointerId != null ? e.pointerId : lastPointerDownId;
+      let move = function (ev) {
+        // 按键已释放却仍有移动 → 就地结束拖动（mouseup 被吞的兜底）；
+        // buttons 不存在的老引擎跳过该校验
+        if (ev.buttons !== undefined && !(ev.buttons & 1)) {
+          up();
+          return;
+        }
+        let dx = ev.clientX - startX;
+        let dy = ev.clientY - startY;
+        if (!dragging) {
+          if (Math.abs(dx) < 5 && Math.abs(dy) < 5) {
+            return; // 未超过阈值，视为点击前奏
+          }
+          dragging = true;
+          // 拖动确立后接管指针：此后光标即便划过 iframe（笔记编辑器、
+          // PDF 阅读器）事件也持续到达胶囊，不再"冻结-回跳"。
+          // 不能在 mousedown 就 capture——capture 会把后续 click 重定向
+          // 到胶囊本身，普通点击胶囊按钮就失效了
+          if (pid != null && cap.setPointerCapture) {
+            try {
+              cap.setPointerCapture(pid);
+            } catch (eCapture) {
+              /* 引擎不支持时退化为纯窗口监听 */
+            }
+          }
+        }
+        cap.style.left =
+          Math.max(0, Math.min(ox + dx, win.innerWidth - 60)) + "px";
+        cap.style.top =
+          Math.max(topLimit, Math.min(oy + dy, win.innerHeight - 50)) + "px";
+      };
+      let up = function () {
+        win.removeEventListener("mousemove", move, true);
+        win.removeEventListener("mouseup", up, true);
+        win.removeEventListener("blur", up, true);
+        dragActive = null;
+        if (pid != null && cap.releasePointerCapture) {
+          try {
+            cap.releasePointerCapture(pid);
+          } catch (eRelease) {
+            /* pointerup 后框架会隐式释放，忽略 */
+          }
+        }
+        if (!dragging) {
+          return;
+        }
+        // 移动过才算拖动：抑制按钮误触并记忆位置
+        suppressClick = true;
+        menu.style.display = "none";
+        win.setTimeout(function () {
+          suppressClick = false;
+        }, 60);
+        try {
+          Zotero.Prefs.set(
+            self._PREF_CAP_POS,
+            JSON.stringify({ x: cap.offsetLeft, y: cap.offsetTop }),
+            true,
+          );
+        } catch (eSave) {
+          /* ignore */
+        }
+      };
+      dragActive = { move: move, up: up };
+      win.addEventListener("mousemove", move, true);
+      win.addEventListener("mouseup", up, true);
+      // 窗口失焦（Alt+Tab 等）收不到 mouseup，就地结束拖动
+      win.addEventListener("blur", up, true);
+    });
+
+    // 主题与初始显示状态
+    this._applyCapTheme(cap, menu);
+    refreshModePills();
+    applyMode();
+    let exited = this._capPref(this._PREF_CAP_EXITED, false) === true;
+    cap.style.display = exited ? "none" : "flex";
+    Zotero.debug(
+      "[MathFixer][Clip] 悬浮胶囊已构建（" +
+        (exited ? "退出态，Tools 菜单 Math Fixer 可唤回" : "显示") +
+        "，全内联样式）",
+    );
+  },
 };
+
